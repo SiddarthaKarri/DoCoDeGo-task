@@ -187,3 +187,35 @@ We will run `pnpm install && pnpm check && pnpm typecheck && pnpm test` on your 
 
 - **Decision:** Added a dedicated `sort_order` integer column to the `members` table (populated via `COALESCE(MAX(sort_order), 0) + 1` within each home) and always queried with `ORDER BY sort_order ASC`.
 - **Why:** Part 2 specifies that extra cents from uneven splits must be distributed to members in the exact order they joined the home, and balances must also follow this order. Timestamps can collide within the same millisecond during high-throughput tests or batch additions, and SQLite row ordering without an explicit `ORDER BY` is non-deterministic. A dedicated `sort_order` integer guarantees 100% reproducible splitting and balance listings.
+
+## Decisions
+
+### 1. Database-Enforced Integrity via Named Constraints
+
+- **Decision:** Implemented named constraints in the D1 SQLite migration (`api/migrations/0001_init.sql`):
+  - `CONSTRAINT fk_members_home_id`: Stops orphan members by ensuring every member links to a valid home, with `ON DELETE CASCADE`.
+  - `CONSTRAINT fk_bills_home_id`: Stops orphan bills from referencing non-existent homes.
+  - `CONSTRAINT fk_shares_bill_id` and `CONSTRAINT fk_shares_member_id`: Stops orphan shares referencing invalid bills or members.
+  - `CONSTRAINT chk_bills_total_cents_positive`: Stops zero or negative total cents from being saved.
+  - `CONSTRAINT chk_shares_amount_cents_positive`: Stops zero or negative share amounts from being created.
+  - `CONSTRAINT uq_shares_bill_member`: Stops duplicate shares for the same member within any given bill.
+  - `CONSTRAINT chk_homes_name_non_empty` and `CONSTRAINT chk_members_name_non_empty`: Stops blank or whitespace-only home/member names.
+- **Why:** Application validation can miss edge cases, race conditions, or direct database access. Enforcing constraints at the database level guarantees relational and monetary integrity, preventing invalid states from ever being persisted.
+
+### 2. Concurrency-Safe Idempotent Payments using Atomic Conditional Updates
+
+- **Decision:** Rather than doing a read-modify-write pattern, payments use an atomic conditional query:
+
+  ```sql
+  UPDATE shares
+  SET paid_at = ?, idempotency_key = ?
+  WHERE id = ? AND bill_id = ? AND paid_at IS NULL
+  ```
+
+  and inspect `result.meta.changes` alongside the stored `idempotency_key`.
+- **Why:** In serverless runtimes with concurrent requests, two users or parallel retries may attempt to pay the same share simultaneously. By pairing SQLite's write serialization with `paid_at IS NULL`, only the first request can successfully mark the share paid. If a retry arrives with the exact same `Idempotency-Key`, the endpoint returns `200` with the original `paidAt` value. If another key arrives, it cleanly returns `409 Conflict`.
+
+### 3. Explicit Insertion Ordering (`sort_order`) for Deterministic Split Remainder Distribution
+
+- **Decision:** Added a dedicated `sort_order` integer column to the `members` table (populated via `COALESCE(MAX(sort_order), 0) + 1` within each home) and always queried with `ORDER BY sort_order ASC`.
+- **Why:** Part 2 specifies that extra cents from uneven splits must be distributed to members in the exact order they joined the home, and balances must also follow this order. Timestamps can collide within the same millisecond during high-throughput tests or batch additions, and SQLite row ordering without an explicit `ORDER BY` is non-deterministic. A dedicated `sort_order` integer guarantees 100% reproducible splitting and balance listings.

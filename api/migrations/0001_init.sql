@@ -48,3 +48,4 @@ CREATE INDEX IF NOT EXISTS idx_bills_home ON bills(home_id);
 CREATE INDEX IF NOT EXISTS idx_shares_bill ON shares(bill_id);
 CREATE INDEX IF NOT EXISTS idx_shares_member ON shares(member_id);
 CREATE INDEX IF NOT EXISTS idx_shares_idempotency ON shares(idempotency_key);
+
