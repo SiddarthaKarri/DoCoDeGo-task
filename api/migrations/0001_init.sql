@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS shares (
   created_at TEXT NOT NULL,
   CONSTRAINT fk_shares_bill_id FOREIGN KEY (bill_id) REFERENCES bills(id) ON DELETE CASCADE,
   CONSTRAINT fk_shares_member_id FOREIGN KEY (member_id) REFERENCES members(id) ON DELETE CASCADE,
-  CONSTRAINT chk_shares_amount_cents_positive CHECK (amount_cents > 0),
+  CONSTRAINT chk_shares_amount_cents_non_negative CHECK (amount_cents >= 0),
   CONSTRAINT uq_shares_bill_member UNIQUE (bill_id, member_id)
 );
 
