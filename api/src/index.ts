@@ -2,7 +2,20 @@ import { Hono } from 'hono'
 
 const app = new Hono<{ Bindings: Env }>()
 
+app.onError((err, c) => {
+  return c.json({ error: err.message || 'Internal server error' }, 500)
+})
+
 app.get('/api/health', (c) => c.json({ status: 'ok' }))
+
+// List homes
+app.get('/api/homes', async (c) => {
+  const result = await c.env.DB.prepare(
+    'SELECT id, name, created_at AS createdAt FROM homes ORDER BY created_at DESC',
+  ).all<{ id: string; name: string; createdAt: string }>()
+
+  return c.json({ homes: result.results ?? [] }, 200)
+})
 
 // Create a new home
 app.post('/api/homes', async (c) => {
@@ -31,6 +44,28 @@ app.post('/api/homes', async (c) => {
     .run()
 
   return c.json({ id, name: trimmedName }, 201)
+})
+
+// Get home details including its members
+app.get('/api/homes/:homeId', async (c) => {
+  const homeId = c.req.param('homeId')
+  const home = await c.env.DB.prepare(
+    'SELECT id, name, created_at AS createdAt FROM homes WHERE id = ?',
+  )
+    .bind(homeId)
+    .first<{ id: string; name: string; createdAt: string }>()
+
+  if (!home) {
+    return c.json({ error: 'Home not found' }, 404)
+  }
+
+  const membersResult = await c.env.DB.prepare(
+    'SELECT id, home_id AS homeId, name, sort_order AS sortOrder, created_at AS createdAt FROM members WHERE home_id = ? ORDER BY sort_order ASC',
+  )
+    .bind(homeId)
+    .all<{ id: string; homeId: string; name: string; sortOrder: number; createdAt: string }>()
+
+  return c.json({ ...home, members: membersResult.results ?? [] }, 200)
 })
 
 // Add a member to a home
@@ -79,6 +114,86 @@ app.post('/api/homes/:homeId/members', async (c) => {
     .run()
 
   return c.json({ id, homeId, name: trimmedName }, 201)
+})
+
+// Get bills and their shares for a home
+app.get('/api/homes/:homeId/bills', async (c) => {
+  const homeId = c.req.param('homeId')
+
+  const home = await c.env.DB.prepare('SELECT id FROM homes WHERE id = ?')
+    .bind(homeId)
+    .first<{ id: string }>()
+
+  if (!home) {
+    return c.json({ error: 'Home not found' }, 404)
+  }
+
+  const billsResult = await c.env.DB.prepare(
+    'SELECT id, home_id AS homeId, title, total_cents AS totalCents, created_at AS createdAt FROM bills WHERE home_id = ? ORDER BY created_at DESC',
+  )
+    .bind(homeId)
+    .all<{ id: string; homeId: string; title: string; totalCents: number; createdAt: string }>()
+
+  const bills = billsResult.results ?? []
+  if (bills.length === 0) {
+    return c.json({ bills: [] }, 200)
+  }
+
+  const billIds = bills.map((b) => b.id)
+  const placeholders = billIds.map(() => '?').join(',')
+
+  const sharesResult = await c.env.DB.prepare(
+    `SELECT
+      s.id,
+      s.bill_id AS billId,
+      s.member_id AS memberId,
+      m.name AS memberName,
+      s.amount_cents AS amountCents,
+      s.paid_at AS paidAt
+    FROM shares s
+    JOIN members m ON m.id = s.member_id
+    WHERE s.bill_id IN (${placeholders})
+    ORDER BY m.sort_order ASC`,
+  )
+    .bind(...billIds)
+    .all<{
+      id: string
+      billId: string
+      memberId: string
+      memberName: string
+      amountCents: number
+      paidAt: string | null
+    }>()
+
+  const sharesByBill = new Map<
+    string,
+    Array<{
+      id: string
+      memberId: string
+      memberName: string
+      amountCents: number
+      paidAt: string | null
+    }>
+  >()
+
+  for (const share of sharesResult.results ?? []) {
+    const list = sharesByBill.get(share.billId) ?? []
+    list.push({
+      id: share.id,
+      memberId: share.memberId,
+      memberName: share.memberName,
+      amountCents: share.amountCents,
+      paidAt: share.paidAt,
+    })
+    sharesByBill.set(share.billId, list)
+  }
+
+  const billsWithShares = bills.map((b) => ({
+    ...b,
+    shares: sharesByBill.get(b.id) ?? [],
+  }))
+
+  return c.json({ bills: billsWithShares }, 200)
 })
 
 // Create a bill in a home and split it among members
