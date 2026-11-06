@@ -179,4 +179,100 @@ app.post('/api/homes/:homeId/bills', async (c) => {
   )
 })
 
+// Pay a share with idempotency protection
+app.post('/api/bills/:billId/shares/:shareId/pay', async (c) => {
+  const idempotencyKey = c.req.header('Idempotency-Key')
+  if (!idempotencyKey || idempotencyKey.trim().length === 0) {
+    return c.json({ error: 'Idempotency-Key header is required' }, 400)
+  }
+
+  const billId = c.req.param('billId')
+  const shareId = c.req.param('shareId')
+
+  const bill = await c.env.DB.prepare('SELECT id FROM bills WHERE id = ?')
+    .bind(billId)
+    .first<{ id: string }>()
+
+  if (!bill) {
+    return c.json({ error: 'Bill not found' }, 404)
+  }
+
+  const share = await c.env.DB.prepare(
+    'SELECT id, member_id, amount_cents, paid_at, idempotency_key FROM shares WHERE id = ? AND bill_id = ?',
+  )
+    .bind(shareId, billId)
+    .first<{
+      id: string
+      member_id: string
+      amount_cents: number
+      paid_at: string | null
+      idempotency_key: string | null
+    }>()
+
+  if (!share) {
+    return c.json({ error: 'Share not found' }, 404)
+  }
+
+  if (share.paid_at !== null) {
+    if (share.idempotency_key === idempotencyKey) {
+      return c.json(
+        {
+          id: share.id,
+          memberId: share.member_id,
+          amountCents: share.amount_cents,
+          paidAt: share.paid_at,
+        },
+        200,
+      )
+    }
+    return c.json({ error: 'Share already paid with a different idempotency key' }, 409)
+  }
+
+  const now = new Date().toISOString()
+  const result = await c.env.DB.prepare(
+    'UPDATE shares SET paid_at = ?, idempotency_key = ? WHERE id = ? AND bill_id = ? AND paid_at IS NULL',
+  )
+    .bind(now, idempotencyKey, shareId, billId)
+    .run()
+
+  if (result.meta.changes === 1) {
+    return c.json(
+      {
+        id: share.id,
+        memberId: share.member_id,
+        amountCents: share.amount_cents,
+        paidAt: now,
+      },
+      200,
+    )
+  }
+
+  // If another concurrent request updated it first:
+  const currentShare = await c.env.DB.prepare(
+    'SELECT id, member_id, amount_cents, paid_at, idempotency_key FROM shares WHERE id = ? AND bill_id = ?',
+  )
+    .bind(shareId, billId)
+    .first<{
+      id: string
+      member_id: string
+      amount_cents: number
+      paid_at: string | null
+      idempotency_key: string | null
+    }>()
+
+  if (currentShare && currentShare.idempotency_key === idempotencyKey) {
+    return c.json(
+      {
+        id: currentShare.id,
+        memberId: currentShare.member_id,
+        amountCents: currentShare.amount_cents,
+        paidAt: currentShare.paid_at,
+      },
+      200,
+    )
+  }
+
+  return c.json({ error: 'Share already paid with a different idempotency key' }, 409)
+})
+
 export default app
