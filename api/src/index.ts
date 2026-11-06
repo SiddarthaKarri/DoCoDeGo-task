@@ -275,4 +275,46 @@ app.post('/api/bills/:billId/shares/:shareId/pay', async (c) => {
   return c.json({ error: 'Share already paid with a different idempotency key' }, 409)
 })
 
+// Get balances for all members of a home
+app.get('/api/homes/:homeId/balances', async (c) => {
+  const homeId = c.req.param('homeId')
+
+  const home = await c.env.DB.prepare('SELECT id FROM homes WHERE id = ?')
+    .bind(homeId)
+    .first<{ id: string }>()
+
+  if (!home) {
+    return c.json({ error: 'Home not found' }, 404)
+  }
+
+  const balancesResult = await c.env.DB.prepare(
+    `SELECT
+      m.id AS memberId,
+      m.name AS name,
+      COALESCE(
+        (
+          SELECT SUM(s.amount_cents)
+          FROM shares s
+          JOIN bills b ON b.id = s.bill_id
+          WHERE s.member_id = m.id
+            AND b.home_id = m.home_id
+            AND s.paid_at IS NULL
+        ),
+        0
+      ) AS outstandingCents
+    FROM members m
+    WHERE m.home_id = ?
+    ORDER BY m.sort_order ASC`,
+  )
+    .bind(homeId)
+    .all<{ memberId: string; name: string; outstandingCents: number }>()
+
+  return c.json(
+    {
+      balances: balancesResult.results ?? [],
+    },
+    200,
+  )
+})
+
 export default app
